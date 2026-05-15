@@ -1628,7 +1628,14 @@ impl<const SSL: bool> WebSocket<SSL> {
         if !this.has_tcp() {
             return;
         }
-        let mut close_reason_buf = [0u8; 128];
+        // RFC 6455 §5.5.1: close-frame payload ≤ 125 bytes (2-byte status +
+        // ≤123-byte reason). `send_close_with_body` takes `&mut [u8; 125]`;
+        // cap the transcode buffer at 125 so a reason that transcodes longer
+        // falls through to the no-reason path (via `break 'inner`) rather
+        // than being truncated mid-codepoint — and so the fixed-array
+        // reference we hand to `send_close_with_body` covers the full
+        // 125-byte provenance.
+        let mut close_reason_buf = [0u8; 125];
         // SAFETY: reason is null or a valid *const ZigString from C++
         if let Some(str) = unsafe { reason.as_ref() } {
             'inner: {
@@ -1667,9 +1674,10 @@ impl<const SSL: bool> WebSocket<SSL> {
                     cursor.set_position((pos + result.written as usize) as u64);
                 }
                 let wrote_len = cursor.position() as usize;
-                // SAFETY: close_reason_buf has 128 bytes; reinterpret first 125 as fixed array
-                let buf_ptr = close_reason_buf.as_mut_ptr().cast::<[u8; 125]>();
-                this.send_close_with_body(code, Some(unsafe { &mut *buf_ptr }), wrote_len);
+                // Buffer is 125 bytes, so `cursor.position() <= 125` — the
+                // write-paths above bail via `break 'inner` on overflow.
+                debug_assert!(wrote_len <= close_reason_buf.len());
+                this.send_close_with_body(code, Some(&mut close_reason_buf), wrote_len);
                 return;
             }
         }
